@@ -1,0 +1,307 @@
+package family139
+
+import (
+	"bytes"
+	"context"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"litepan/internal/domain"
+	"litepan/internal/driver"
+	"litepan/internal/httpx"
+)
+
+const (
+	routePolicyURL  = "https://user-njs.yun.139.com/user/route/qryRoutePolicy"
+	tokenRefreshURL = "https://aas.caiyun.feixin.10086.cn/tellin/authTokenRefresh.do"
+	webOrigin       = "https://yun.139.com"
+	userAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+	familyQueryContentList = "/orchestration/familyCloud-rebuild/content/v1.2/queryContentList"
+	familyGetDownloadURL   = "/orchestration/familyCloud-rebuild/content/v1.0/getFileDownLoadURL"
+	familyCreateCloudDoc   = "/orchestration/familyCloud-rebuild/cloudCatalog/v1.0/createCloudDoc"
+	familyBatchOprTask     = "/orchestration/familyCloud-rebuild/batchOprTask/v1.0/createBatchOprTask"
+	familyModifyContent    = "/orchestration/familyCloud-rebuild/andAlbum/openApi/modifyContentInfo"
+	isboBatchOprTask       = "/isbo/openApi/createBatchOprTask"
+
+	listPageSize            = 100
+	defaultOperationDelayMS = 300
+)
+
+func (d *Driver) rootID() string {
+	if root := strings.TrimSpace(d.add.RootFolderID); root != "" {
+		return root
+	}
+	return d.providerRoot
+}
+
+func (d *Driver) normalizeParent(parentID string) string {
+	p := strings.TrimSpace(parentID)
+	if p == "" || p == "0" || p == "root" || p == "/" {
+		return d.rootID()
+	}
+	return p
+}
+
+func (d *Driver) waitOperationDelay(ctx context.Context) error {
+	return driver.WaitRequestInterval(ctx, d.intervalGate, defaultOperationDelayMS)
+}
+
+// queryFamilyCloudHost 从路由策略中查询家庭云的 API 主机地址。
+func (d *Driver) queryFamilyCloudHost(ctx context.Context) (string, error) {
+	body := map[string]any{
+		"userInfo": map[string]any{
+			"userType":    1,
+			"accountType": 1,
+			"accountName": d.currentAccount(),
+		},
+		"modAddrType": 1,
+	}
+	var route routePolicyData
+	err := d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
+	if isAuthError(err) {
+		if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
+			return "", refreshErr
+		}
+		err = d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, item := range route.RoutePolicyList {
+		if strings.EqualFold(strings.TrimSpace(item.ModName), "family") {
+			host := strings.TrimRight(firstNonEmpty(item.HTTPSURL, item.HTTPURL), "/")
+			if host != "" {
+				return host, nil
+			}
+		}
+	}
+	return "", domain.Errorf(domain.CodeDriverError, "移动家庭云路由策略未返回家庭云主机")
+}
+
+type signScope int
+
+const (
+	signScopePersonal signScope = iota
+	signScopeFamily
+)
+
+// signedRequest 发送带签名的 POST JSON 请求。
+func (d *Driver) signedRequest(ctx context.Context, rawURL string, scope signScope, body, out any) error {
+	if err := d.waitOperationDelay(ctx); err != nil {
+		return err
+	}
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	randomValue, err := randomString(16)
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	headers := d.signedHeaders(d.currentAuthorization(), ts, randomValue, calcSign(string(rawBody), ts, randomValue), scope)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(rawBody))
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, data, err := httpx.Execute(d.client, req, httpx.DefaultReadLimit)
+	if err != nil {
+		return domain.Wrap(domain.CodeDriverError, err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return domain.Errorf(domain.CodeAuthExpired, "移动家庭云认证已过期")
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return domain.Errorf(domain.CodePermissionDenied, "移动家庭云拒绝访问")
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云 API HTTP %d: %s", resp.StatusCode, httpx.Truncate(data, 300))
+	}
+	var envelope apiEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return domain.Wrap(domain.CodeDriverError, err)
+	}
+	// CreateBatchOprTaskResp 的 "成功"判定标准不同：resultCode == "0"
+	if isBatchOpResponse(envelope, out) {
+		return nil
+	}
+	if envelope.Success != nil && !*envelope.Success {
+		return mapAPIError(envelope.Code.String(), envelope.Message)
+	}
+	if out != nil && len(envelope.Data) > 0 && string(envelope.Data) != "null" {
+		if err := json.Unmarshal(envelope.Data, out); err != nil {
+			return domain.Wrap(domain.CodeDriverError, err)
+		}
+	}
+	return nil
+}
+
+// isBatchOpResponse 检查是否是批量操作响应且 resultCode == "0"。
+func isBatchOpResponse(env apiEnvelope, out any) bool {
+	if out == nil {
+		return false
+	}
+	resp, ok := out.(*batchOprTaskData)
+	if !ok {
+		return false
+	}
+	// 尝试从 data 字段解析
+	if len(env.Data) > 0 && string(env.Data) != "null" {
+		var result struct {
+			Result struct {
+				ResultCode string `json:"resultCode"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(env.Data, &result); err == nil && result.Result.ResultCode == "0" {
+			resp.Result.ResultCode = result.Result.ResultCode
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Driver) signedHeaders(authorization, ts, randomValue, sign string, scope signScope) map[string]string {
+	headers := map[string]string{
+		"Accept":             "application/json, text/plain, */*",
+		"Authorization":      "Basic " + normalizeAuthorization(authorization),
+		"CMS-DEVICE":         "default",
+		"Content-Type":       "application/json;charset=UTF-8",
+		"mcloud-channel":     "1000101",
+		"mcloud-client":      "10701",
+		"mcloud-sign":        ts + "," + randomValue + "," + sign,
+		"mcloud-version":     "7.14.0",
+		"Origin":             webOrigin,
+		"Referer":            webOrigin + "/w/",
+		"User-Agent":         userAgent,
+		"x-DeviceInfo":       "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-m4c-caller":       "PC",
+	}
+	if scope == signScopeFamily {
+		headers["x-SvcType"] = "2"
+		headers["x-yun-svc-type"] = "2"
+	} else {
+		headers["x-SvcType"] = "1"
+		headers["x-yun-svc-type"] = "1"
+	}
+	return headers
+}
+
+// familyAPIRequest 是家庭云 API 的统一入口：注入通用参数 → 签名 → 请求 → 自动刷新重试。
+func (d *Driver) familyAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
+	enriched := d.familyNewJson(body)
+	err := d.signedRequest(ctx, d.familyHost+path, signScopeFamily, enriched, out)
+	if !isAuthError(err) {
+		return err
+	}
+	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
+		return refreshErr
+	}
+	return d.signedRequest(ctx, d.familyHost+path, signScopeFamily, enriched, out)
+}
+
+// isboAPIRequest 是 ISBO 接口（移动/复制）的统一入口。
+func (d *Driver) isboAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
+	err := d.signedRequest(ctx, isboBaseURL+path, signScopePersonal, body, out)
+	if !isAuthError(err) {
+		return err
+	}
+	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
+		return refreshErr
+	}
+	return d.signedRequest(ctx, isboBaseURL+path, signScopePersonal, body, out)
+}
+
+const isboBaseURL = "https://group.yun.139.com/hcy/mutual/adapter"
+
+// familyNewJson 在请求体中注入家庭云通用参数。
+func (d *Driver) familyNewJson(data map[string]any) map[string]any {
+	result := make(map[string]any, len(data)+4)
+	for k, v := range data {
+		result[k] = v
+	}
+	result["catalogType"] = 3
+	result["cloudID"] = d.cloudID
+	result["cloudType"] = 1
+	result["commonAccountInfo"] = map[string]any{
+		"account":     d.currentAccount(),
+		"accountType": 1,
+	}
+	return result
+}
+
+func calcSign(body, ts, randomValue string) string {
+	encoded := encodeURIComponent(body)
+	chars := strings.Split(encoded, "")
+	sort.Strings(chars)
+	sortedBody := strings.Join(chars, "")
+	encodedBody := base64.StdEncoding.EncodeToString([]byte(sortedBody))
+	first := md5.Sum([]byte(encodedBody))
+	second := md5.Sum([]byte(ts + ":" + randomValue))
+	final := md5.Sum([]byte(hex.EncodeToString(first[:]) + hex.EncodeToString(second[:])))
+	return strings.ToUpper(hex.EncodeToString(final[:]))
+}
+
+func encodeURIComponent(value string) string {
+	encoded := url.QueryEscape(value)
+	return strings.ReplaceAll(encoded, "+", "%20")
+}
+
+func randomString(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	buf := make([]byte, length)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	for index := range buf {
+		buf[index] = alphabet[int(buf[index])%len(alphabet)]
+	}
+	return string(buf), nil
+}
+
+func mapAPIError(code, message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "移动家庭云 API 返回错误"
+	}
+	switch strings.TrimSpace(code) {
+	case "9000", "9008", "9100", "100002":
+		return domain.Errorf(domain.CodeAuthExpired, "移动家庭云认证已过期：%s", message)
+	case "403", "100403":
+		return domain.Errorf(domain.CodePermissionDenied, "移动家庭云权限不足：%s", message)
+	case "429":
+		return domain.Errorf(domain.CodeRateLimited, "移动家庭云接口限流：%s", message)
+	default:
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云 API 错误(%s)：%s", code, message)
+	}
+}
+
+func isAuthError(err error) bool {
+	ae, ok := domain.AsAppError(err)
+	return ok && ae.Code == domain.CodeAuthExpired
+}
+
+func parseInt64(value string) (int64, error) {
+	return strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}

@@ -5,6 +5,7 @@ import (
 	_ "litepan/drivers/115_Open"
 	_ "litepan/drivers/123_Open"
 	_ "litepan/drivers/139Cloud"
+	_ "litepan/drivers/139Family"
 	_ "litepan/drivers/189Cloud"
 	_ "litepan/drivers/Baidu_Open"
 	_ "litepan/drivers/Guangya"
