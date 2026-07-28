@@ -125,7 +125,7 @@ func (d *Driver) UploadLocalFile(ctx context.Context, req driver.LocalUploadRequ
 			"groupType":   1,
 			"catalogType": 3,
 		}
-		if err := d.familyAPIRequest(ctx, pathUploadCreate, createBody, &created); err != nil {
+		if err := d.familyUploadAPIRequest(ctx, pathUploadCreate, createBody, &created); err != nil {
 			return nil, err
 		}
 		if created.RapidUpload || created.Exist {
@@ -171,7 +171,7 @@ func (d *Driver) UploadLocalFile(ctx context.Context, req driver.LocalUploadRequ
 				"groupId":   d.cloudID,
 				"groupType": 1,
 			}
-			if err := d.familyAPIRequest(ctx, pathUploadURLs, getURLBody, &more); err != nil {
+			if err := d.familyUploadAPIRequest(ctx, pathUploadURLs, getURLBody, &more); err != nil {
 				return nil, err
 			}
 			mergeUploadURLs(urls, more.PartInfos)
@@ -208,7 +208,7 @@ func (d *Driver) UploadLocalFile(ctx context.Context, req driver.LocalUploadRequ
 		"groupId":              d.cloudID,
 		"groupType":            1,
 	}
-	if err := d.familyAPIRequest(ctx, pathUploadComplete, completeBody, nil); err != nil {
+	if err := d.familyUploadAPIRequest(ctx, pathUploadComplete, completeBody, nil); err != nil {
 		return nil, err
 	}
 	finalName := firstNonEmpty(created.FileName, fileName)

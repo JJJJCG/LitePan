@@ -183,39 +183,139 @@ func isBatchOpResponse(env apiEnvelope, out any) bool {
 	return false
 }
 
+// signedHeaders 返回家庭云常规 API（列表、下载、删除等）的签名请求头。
+// 对齐 OpenList 的 request() —— 不包含 x-yun-* 系列和 Caller/mcloud-route。
 func (d *Driver) signedHeaders(authorization, ts, randomValue, sign string, scope signScope) map[string]string {
 	svcType := "1"
 	if scope == signScopeFamily {
 		svcType = "2"
 	}
 	return map[string]string{
-		"Accept":                "application/json, text/plain, */*",
-		"Authorization":         "Basic " + normalizeAuthorization(authorization),
-		"CMS-DEVICE":            "default",
-		"Content-Type":          "application/json;charset=UTF-8",
+		"Accept":                 "application/json, text/plain, */*",
+		"Authorization":          "Basic " + normalizeAuthorization(authorization),
+		"CMS-DEVICE":             "default",
+		"Content-Type":           "application/json;charset=UTF-8",
 		"Inner-Hcy-Router-Https": "1",
-		"Caller":                "web",
-		"mcloud-channel":        "1000101",
-		"mcloud-client":         "10701",
-		"mcloud-route":          "001",
-		"mcloud-sign":           ts + "," + randomValue + "," + sign,
-		"mcloud-version":        "7.14.0",
-		"Origin":                webOrigin,
-		"Referer":               webOrigin + "/w/",
-		"User-Agent":            userAgent,
-		"x-DeviceInfo":          "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
-		"x-huawei-channelSrc":   "10000034",
-		"x-inner-ntwk":          "2",
-		"x-m4c-caller":          "PC",
-		"x-m4c-src":             "10002",
-		"x-SvcType":             svcType,
-		"x-yun-api-version":     "v1",
-		"x-yun-app-channel":     "10000034",
-		"x-yun-channel-source":  "10000034",
-		"x-yun-client-info":     "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
-		"x-yun-module-type":     "100",
-		"x-yun-svc-type":        svcType,
+		"mcloud-channel":         "1000101",
+		"mcloud-client":          "10701",
+		"mcloud-sign":            ts + "," + randomValue + "," + sign,
+		"mcloud-version":         "7.14.0",
+		"Origin":                 webOrigin,
+		"Referer":                webOrigin + "/w/",
+		"User-Agent":             userAgent,
+		"x-DeviceInfo":           "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-huawei-channelSrc":    "10000034",
+		"x-inner-ntwk":           "2",
+		"x-m4c-caller":           "PC",
+		"x-m4c-src":              "10002",
+		"x-SvcType":              svcType,
 	}
+}
+
+// uploadSignedHeaders 返回家庭云上传 API（/dynamic/file/*）的签名请求头。
+// 对齐 OpenList 的 newRequest() —— 额外包含 x-yun-* 系列和 Caller/mcloud-route。
+func (d *Driver) uploadSignedHeaders(authorization, ts, randomValue, sign string, scope signScope) map[string]string {
+	svcType := "1"
+	if scope == signScopeFamily {
+		svcType = "2"
+	}
+	return map[string]string{
+		"Accept":                 "application/json, text/plain, */*",
+		"Authorization":          "Basic " + normalizeAuthorization(authorization),
+		"CMS-DEVICE":             "default",
+		"Content-Type":           "application/json;charset=UTF-8",
+		"Inner-Hcy-Router-Https": "1",
+		"Caller":                 "web",
+		"mcloud-channel":         "1000101",
+		"mcloud-client":          "10701",
+		"mcloud-route":           "001",
+		"mcloud-sign":            ts + "," + randomValue + "," + sign,
+		"mcloud-version":         "7.14.0",
+		"Origin":                 webOrigin,
+		"Referer":                webOrigin + "/w/",
+		"User-Agent":             userAgent,
+		"x-DeviceInfo":           "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-huawei-channelSrc":    "10000034",
+		"x-inner-ntwk":           "2",
+		"x-m4c-caller":           "PC",
+		"x-m4c-src":              "10002",
+		"x-SvcType":              svcType,
+		"x-yun-api-version":      "v1",
+		"x-yun-app-channel":      "10000034",
+		"x-yun-channel-source":   "10000034",
+		"x-yun-client-info":      "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
+		"x-yun-module-type":      "100",
+		"x-yun-svc-type":         svcType,
+	}
+}
+
+// signedUploadRequest 发送带签名的 POST JSON 请求，使用上传专用请求头（x-yun-* 系列）。
+func (d *Driver) signedUploadRequest(ctx context.Context, rawURL string, scope signScope, body, out any) error {
+	if err := d.waitOperationDelay(ctx); err != nil {
+		return err
+	}
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	randomValue, err := randomString(16)
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	headers := d.uploadSignedHeaders(d.currentAuthorization(), ts, randomValue, calcSign(string(rawBody), ts, randomValue), scope)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(rawBody))
+	if err != nil {
+		return domain.Wrap(domain.CodeInternal, err)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, data, err := httpx.Execute(d.client, req, httpx.DefaultReadLimit)
+	if err != nil {
+		return domain.Wrap(domain.CodeDriverError, err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return domain.Errorf(domain.CodeAuthExpired, "移动家庭云认证已过期")
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return domain.Errorf(domain.CodePermissionDenied, "移动家庭云拒绝访问")
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云 API HTTP %d: %s", resp.StatusCode, httpx.Truncate(data, 300))
+	}
+	var envelope apiEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return domain.Wrap(domain.CodeDriverError, err)
+	}
+	if isBatchOpResponse(envelope, out) {
+		return nil
+	}
+	if envelope.Success != nil && !*envelope.Success {
+		return mapAPIError(envelope.Code.String(), envelope.Message)
+	}
+	if out != nil && len(envelope.Data) > 0 && string(envelope.Data) != "null" {
+		if err := json.Unmarshal(envelope.Data, out); err != nil {
+			return domain.Wrap(domain.CodeDriverError, err)
+		}
+	}
+	return nil
+}
+
+// familyUploadAPIRequest 是家庭云上传 API 的统一入口，使用上传专用请求头。
+func (d *Driver) familyUploadAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
+	if d.groupHost == "" {
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云尚未获取 API 主机地址")
+	}
+	enriched := d.familyNewJson(body)
+	err := d.signedUploadRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
+	if !isAuthError(err) {
+		return err
+	}
+	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
+		return refreshErr
+	}
+	return d.signedUploadRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
 }
 
 // familyAPIRequest 是家庭云 API 的统一入口：注入通用参数 → 签名 → 请求 → 自动刷新重试。
