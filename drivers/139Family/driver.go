@@ -24,7 +24,8 @@ type Driver struct {
 
 	authorization string
 	account       string
-	familyHost    string
+	groupHost     string // 家庭云 API 主机（列表、下载、删除等主操作）
+	familyHost    string // 家庭云 AndAlbum 主机（移动、复制、重命名用）
 	cloudID       string
 	providerRoot  string
 }
@@ -92,7 +93,13 @@ func (d *Driver) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	d.familyHost = host
+	d.groupHost = host
+
+	andrHost, err := d.queryAndAlbumHost(ctx)
+	if err != nil {
+		return err
+	}
+	d.familyHost = andrHost
 
 	if d.providerRoot == "" {
 		root, err := d.getFamilyRootPath(ctx)
@@ -178,6 +185,8 @@ func (d *Driver) ExplainConnectionError(technical string, saving bool) string {
 		return prefix + "：请填写家庭云ID"
 	case strings.Contains(technical, "移动家庭云路由策略"):
 		return prefix + "：获取家庭云服务地址失败，" + technical
+	case strings.Contains(technical, "尚未获取 API 主机"):
+		return prefix + "：无法获取家庭云服务地址，请检查账号和网络连接"
 	default:
 		return ""
 	}

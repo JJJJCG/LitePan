@@ -56,8 +56,8 @@ func (d *Driver) waitOperationDelay(ctx context.Context) error {
 	return driver.WaitRequestInterval(ctx, d.intervalGate, defaultOperationDelayMS)
 }
 
-// queryFamilyCloudHost 从路由策略中查询家庭云的 API 主机地址。
-func (d *Driver) queryFamilyCloudHost(ctx context.Context) (string, error) {
+// queryRoutePolicy 从路由策略查询指定 modName 的主机地址。
+func (d *Driver) queryRoutePolicy(ctx context.Context, modName string) (string, error) {
 	body := map[string]any{
 		"userInfo": map[string]any{
 			"userType":    1,
@@ -67,25 +67,35 @@ func (d *Driver) queryFamilyCloudHost(ctx context.Context) (string, error) {
 		"modAddrType": 1,
 	}
 	var route routePolicyData
-	err := d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
+	err := d.signedRequest(ctx, routePolicyURL, signScopePersonal, body, &route)
 	if isAuthError(err) {
 		if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
 			return "", refreshErr
 		}
-		err = d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
+		err = d.signedRequest(ctx, routePolicyURL, signScopePersonal, body, &route)
 	}
 	if err != nil {
 		return "", err
 	}
 	for _, item := range route.RoutePolicyList {
-		if strings.EqualFold(strings.TrimSpace(item.ModName), "family") {
+		if strings.EqualFold(strings.TrimSpace(item.ModName), modName) {
 			host := strings.TrimRight(firstNonEmpty(item.HTTPSURL, item.HTTPURL), "/")
 			if host != "" {
 				return host, nil
 			}
 		}
 	}
-	return "", domain.Errorf(domain.CodeDriverError, "移动家庭云路由策略未返回家庭云主机")
+	return "", domain.Errorf(domain.CodeDriverError, "移动家庭云路由策略未返回 %s 主机", modName)
+}
+
+// queryFamilyCloudHost 查询 GroupCloudHost（家庭云主操作：列表、下载、删除等）。
+func (d *Driver) queryFamilyCloudHost(ctx context.Context) (string, error) {
+	return d.queryRoutePolicy(ctx, "group")
+}
+
+// queryAndAlbumHost 查询 AndAlbum 主机（家庭云移动、复制、重命名用）。
+func (d *Driver) queryAndAlbumHost(ctx context.Context) (string, error) {
+	return d.queryRoutePolicy(ctx, "family")
 }
 
 type signScope int
@@ -200,7 +210,28 @@ func (d *Driver) signedHeaders(authorization, ts, randomValue, sign string, scop
 }
 
 // familyAPIRequest 是家庭云 API 的统一入口：注入通用参数 → 签名 → 请求 → 自动刷新重试。
+// 使用 GroupCloudHost（列表/下载/删除/上传等主操作）。
 func (d *Driver) familyAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
+	if d.groupHost == "" {
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云尚未获取 API 主机地址")
+	}
+	enriched := d.familyNewJson(body)
+	err := d.signedRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
+	if !isAuthError(err) {
+		return err
+	}
+	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
+		return refreshErr
+	}
+	return d.signedRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
+}
+
+// familyAndAlbumRequest 是 AndAlbum 接口（移动/复制/重命名）的统一入口。
+// 使用 FamilyCloudHost（AndAlbum 主机）。
+func (d *Driver) familyAndAlbumRequest(ctx context.Context, path string, body map[string]any, out any) error {
+	if d.familyHost == "" {
+		return domain.Errorf(domain.CodeDriverError, "移动家庭云尚未获取 AndAlbum 主机地址")
+	}
 	enriched := d.familyNewJson(body)
 	err := d.signedRequest(ctx, d.familyHost+path, signScopeFamily, enriched, out)
 	if !isAuthError(err) {

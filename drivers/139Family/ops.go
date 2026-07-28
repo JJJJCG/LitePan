@@ -160,7 +160,7 @@ func (d *Driver) RenameFile(ctx context.Context, fileID, newName string) error {
 	}
 
 	var result modifyContentData
-	return d.familyAPIRequest(ctx, familyModifyContent, map[string]any{
+	return d.familyAndAlbumRequest(ctx, familyModifyContent, map[string]any{
 		"contentID": fileID,
 		"newName":   newName,
 	}, &result)
