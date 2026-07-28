@@ -47,6 +47,7 @@ type Service struct {
 	dirtyAccounts            map[int64]bool
 	pendingRun               map[int64]string
 	scanProgress             map[int64]liveScanProgress
+	fileOperations           map[int64]struct{}
 	organizeBusy             RunningAccountLister
 	retentionBusy            RunningAccountLister
 	automationManagedChecker func(context.Context, int64) (bool, error)
@@ -95,6 +96,7 @@ func NewService(opts ServiceOptions) *Service {
 		taskCancels:     make(map[int64]context.CancelFunc),
 		dirtyAccounts:   make(map[int64]bool),
 		pendingRun:      make(map[int64]string),
+		fileOperations:  make(map[int64]struct{}),
 	}
 }
 
@@ -114,6 +116,38 @@ func (s *Service) SetRetentionBusyChecker(checker RunningAccountLister) {
 	s.mu.Lock()
 	s.retentionBusy = checker
 	s.mu.Unlock()
+}
+
+func (s *Service) IsTaskFileOperationBusy(taskID int64) bool {
+	if s == nil || taskID <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	_, busy := s.fileOperations[taskID]
+	s.mu.Unlock()
+	return busy
+}
+
+func (s *Service) TryBeginTaskFileOperation(taskID int64) (func(), bool) {
+	if s == nil || taskID <= 0 {
+		return nil, false
+	}
+	s.mu.Lock()
+	if _, busy := s.fileOperations[taskID]; busy {
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.fileOperations[taskID] = struct{}{}
+	s.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.fileOperations, taskID)
+			s.mu.Unlock()
+		})
+	}, true
 }
 
 func (s *Service) SetAutomationManagedChecker(checker func(context.Context, int64) (bool, error)) {
@@ -341,6 +375,9 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 	if s.isRetentionBusy(task.AccountID) {
 		return nil, domain.Errorf(domain.CodeValidation, "同账号缓存保持任务执行中，请稍后再试")
 	}
+	if s.IsTaskFileOperationBusy(task.ID) {
+		return nil, domain.Errorf(domain.CodeValidation, "该 STRM 任务正在处理本地文件，请稍后再试")
+	}
 	if runMode == "" {
 		runMode = domain.StrmRunModeAuto
 	}
@@ -363,8 +400,8 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 	return task, nil
 }
 
-func (s *Service) OnFileMutated(_ context.Context, e eventbus.FileMutated) {
-	if e.Op == "move" {
+func (s *Service) OnFileMutated(ctx context.Context, e eventbus.FileMutated) {
+	if e.Op == "move" || isMetadataSyncMutation(ctx) {
 		return
 	}
 	s.mu.Lock()
@@ -398,6 +435,7 @@ func (s *Service) GetRuntimeSettings(ctx context.Context, requestBase string) (m
 		"metadata_extensions":     s.settings.String(settings.KeyStrmMetadataExtensions),
 		"metadata_max_size_mb":    s.settings.Int(settings.KeyStrmMetadataMaxSizeMB),
 		"metadata_parent_enabled": s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
+		"metadata_sync_mode":      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
 	}, nil
 }
 
@@ -559,6 +597,7 @@ func (s *Service) scanSettings() ScanSettings {
 		MetadataExtensions:    s.settings.String(settings.KeyStrmMetadataExtensions),
 		MetadataMaxSizeMB:     s.settings.Int(settings.KeyStrmMetadataMaxSizeMB),
 		MetadataParentEnabled: s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
+		MetadataSyncMode:      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
 	}
 }
 
@@ -567,6 +606,15 @@ func (s *Service) ListBranches(ctx context.Context, taskID int64) ([]*domain.Str
 		return nil, nil
 	}
 	return s.branches.ListByTask(ctx, taskID)
+}
+
+type BranchPatch struct {
+	ParentID      *string
+	Path          *string
+	Recursive     *bool
+	RetentionDays *int
+	BranchType    *string
+	Status        *string
 }
 
 func (s *Service) CreateBranch(ctx context.Context, branch *domain.StrmBranch) (*domain.StrmBranch, error) {
@@ -585,6 +633,9 @@ func (s *Service) CreateBranch(ctx context.Context, branch *domain.StrmBranch) (
 	if branch.BranchType == domain.StrmBranchTypeBase {
 		branch.Recursive = false
 		branch.RetentionDays = 0
+		branch.ExpiresAt = time.Time{}
+	} else if err := normalizeTemporaryBranchExpiry(branch, false); err != nil {
+		return nil, err
 	}
 	if branch.Status == "" {
 		branch.Status = "running"
@@ -599,22 +650,70 @@ func (s *Service) CreateBranch(ctx context.Context, branch *domain.StrmBranch) (
 	return s.branches.Get(ctx, id)
 }
 
-func (s *Service) UpdateBranch(ctx context.Context, branch *domain.StrmBranch) (*domain.StrmBranch, error) {
+func (s *Service) UpdateBranch(ctx context.Context, taskID, branchID int64, patch BranchPatch) (*domain.StrmBranch, error) {
 	if s.branches == nil {
 		return nil, domain.Errf(domain.CodeNotImplement)
 	}
-	task, err := s.repo.Get(ctx, branch.TaskID)
+	branch, err := s.branches.Get(ctx, branchID)
 	if err != nil {
 		return nil, err
+	}
+	if branch.TaskID != taskID {
+		return nil, domain.Errorf(domain.CodeNotFound, "STRM 分支不存在")
+	}
+	task, err := s.repo.Get(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if patch.ParentID != nil {
+		branch.ParentID = *patch.ParentID
+	}
+	if patch.Path != nil {
+		branch.Path = *patch.Path
+	}
+	if patch.Recursive != nil {
+		branch.Recursive = *patch.Recursive
+	}
+	retentionChanged := patch.RetentionDays != nil
+	if retentionChanged {
+		branch.RetentionDays = *patch.RetentionDays
+	}
+	if patch.BranchType != nil {
+		branch.BranchType = *patch.BranchType
+	}
+	if patch.Status != nil {
+		branch.Status = *patch.Status
 	}
 	branch.RelativePath = branchRelativePath(task.Path, branch.Path)
 	if branch.BranchType == domain.StrmBranchTypeBase {
 		branch.Recursive = false
+		branch.RetentionDays = 0
+		branch.ExpiresAt = time.Time{}
+	} else if err := normalizeTemporaryBranchExpiry(branch, retentionChanged); err != nil {
+		return nil, err
 	}
 	if err := s.branches.Update(ctx, branch); err != nil {
 		return nil, err
 	}
 	return s.branches.Get(ctx, branch.ID)
+}
+
+func normalizeTemporaryBranchExpiry(branch *domain.StrmBranch, reset bool) error {
+	if branch.RetentionDays < 0 || branch.RetentionDays > 3650 {
+		return domain.Errorf(domain.CodeValidation, "监控分支保留天数需为 0 到 3650")
+	}
+	if branch.RetentionDays == 0 {
+		branch.ExpiresAt = time.Time{}
+		return nil
+	}
+	if reset || branch.ExpiresAt.IsZero() {
+		baseTime := branch.CreatedAt
+		if baseTime.IsZero() {
+			baseTime = time.Now()
+		}
+		branch.ExpiresAt = baseTime.Add(time.Duration(branch.RetentionDays) * 24 * time.Hour)
+	}
+	return nil
 }
 
 func (s *Service) DeleteBranch(ctx context.Context, id int64) error {
