@@ -184,29 +184,38 @@ func isBatchOpResponse(env apiEnvelope, out any) bool {
 }
 
 func (d *Driver) signedHeaders(authorization, ts, randomValue, sign string, scope signScope) map[string]string {
-	headers := map[string]string{
-		"Accept":             "application/json, text/plain, */*",
-		"Authorization":      "Basic " + normalizeAuthorization(authorization),
-		"CMS-DEVICE":         "default",
-		"Content-Type":       "application/json;charset=UTF-8",
-		"mcloud-channel":     "1000101",
-		"mcloud-client":      "10701",
-		"mcloud-sign":        ts + "," + randomValue + "," + sign,
-		"mcloud-version":     "7.14.0",
-		"Origin":             webOrigin,
-		"Referer":            webOrigin + "/w/",
-		"User-Agent":         userAgent,
-		"x-DeviceInfo":       "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
-		"x-m4c-caller":       "PC",
-	}
+	svcType := "1"
 	if scope == signScopeFamily {
-		headers["x-SvcType"] = "2"
-		headers["x-yun-svc-type"] = "2"
-	} else {
-		headers["x-SvcType"] = "1"
-		headers["x-yun-svc-type"] = "1"
+		svcType = "2"
 	}
-	return headers
+	return map[string]string{
+		"Accept":                "application/json, text/plain, */*",
+		"Authorization":         "Basic " + normalizeAuthorization(authorization),
+		"CMS-DEVICE":            "default",
+		"Content-Type":          "application/json;charset=UTF-8",
+		"Inner-Hcy-Router-Https": "1",
+		"Caller":                "web",
+		"mcloud-channel":        "1000101",
+		"mcloud-client":         "10701",
+		"mcloud-route":          "001",
+		"mcloud-sign":           ts + "," + randomValue + "," + sign,
+		"mcloud-version":        "7.14.0",
+		"Origin":                webOrigin,
+		"Referer":               webOrigin + "/w/",
+		"User-Agent":            userAgent,
+		"x-DeviceInfo":          "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||",
+		"x-huawei-channelSrc":   "10000034",
+		"x-inner-ntwk":          "2",
+		"x-m4c-caller":          "PC",
+		"x-m4c-src":             "10002",
+		"x-SvcType":             svcType,
+		"x-yun-api-version":     "v1",
+		"x-yun-app-channel":     "10000034",
+		"x-yun-channel-source":  "10000034",
+		"x-yun-client-info":     "||9|7.14.0|chrome|120.0.0.0|||windows 10||zh-CN|||dW5kZWZpbmVk||",
+		"x-yun-module-type":     "100",
+		"x-yun-svc-type":        svcType,
+	}
 }
 
 // familyAPIRequest 是家庭云 API 的统一入口：注入通用参数 → 签名 → 请求 → 自动刷新重试。
