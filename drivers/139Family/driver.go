@@ -164,10 +164,17 @@ func (d *Driver) GetFileInfo(ctx context.Context, fileID string) (*domain.FileIt
 			IDKind: domain.IDStable,
 		}, nil
 	}
-	// 家庭云没有单独的文件信息接口，复用列表接口查询父目录
-	// 这里通过简单的列表重新查找的方式来获取单个文件信息
-	// 对于文件的 GetFileInfo，在 LitePan 中通常通过缓存或父目录列表解决
-	return nil, domain.Errorf(domain.CodeNotImplement, "移动家庭云暂不支持单文件查询，请使用列表操作")
+	// 家庭云没有单独的文件查询 API；从编码 ID 中提取 contentID 返回基本可用信息
+	id, _ := splitFamilyItemID(fileID)
+	if id == "" {
+		return nil, domain.Errorf(domain.CodeValidation, "file_id 无效")
+	}
+	return &domain.FileItem{
+		ID:     fileID,
+		Name:   id,
+		IsDir:  false,
+		IDKind: domain.IDStable,
+	}, nil
 }
 
 func (d *Driver) ExplainConnectionError(technical string, saving bool) string {
