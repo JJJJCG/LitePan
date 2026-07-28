@@ -31,25 +31,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 根据 git ref 生成镜像标签
-      - name: Generate tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+      # 从源码提取版本号作为镜像标签
+      - name: Extract version
+        id: version
+        run: |
+          VER=$(grep -oP 'AppVersion\s*=\s*"\K[^"]+' internal/httpx/user_agent.go)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
 
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # 如果要同时支持 amd64 + arm64（如 NAS），去掉下面注释
