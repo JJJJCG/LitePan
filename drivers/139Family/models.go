@@ -8,8 +8,6 @@ import (
 	"litepan/internal/domain"
 )
 
-type flexString = json.Number
-
 type apiEnvelope struct {
 	Success *bool           `json:"success"`
 	Code    flexString      `json:"code"`
