@@ -49,7 +49,8 @@ func (d *Driver) normalizeParent(parentID string) string {
 	if p == "" || p == "0" || p == "root" || p == "/" {
 		return d.rootID()
 	}
-	return p
+	id, _ := splitFamilyItemID(p)
+	return id
 }
 
 func (d *Driver) waitOperationDelay(ctx context.Context) error {
@@ -432,6 +433,20 @@ func isAuthError(err error) bool {
 
 func parseInt64(value string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+}
+
+// splitFamilyItemID 从编码的文件 ID 中分离 contentID/catalogID 和父目录路径。
+// 编码格式：contentID|parentPath；无 | 时 path 为空。
+func splitFamilyItemID(fileID string) (id, path string) {
+	id, path, _ = strings.Cut(fileID, "|")
+	return
+}
+
+func encodeFamilyItemID(id, parentPath string) string {
+	if parentPath == "" {
+		return id
+	}
+	return id + "|" + parentPath
 }
 
 func firstNonEmpty(values ...string) string {

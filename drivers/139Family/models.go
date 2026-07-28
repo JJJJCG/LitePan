@@ -47,7 +47,7 @@ type familyContentEntry struct {
 
 func (e familyCatalogEntry) toFileItem(path string) domain.FileItem {
 	return domain.FileItem{
-		ID:      e.CatalogID,
+		ID:      encodeFamilyItemID(e.CatalogID, path),
 		Name:    e.CatalogName,
 		IsDir:   true,
 		ModTime: parseFamilyTime(e.LastUpdateTime),
@@ -57,7 +57,7 @@ func (e familyCatalogEntry) toFileItem(path string) domain.FileItem {
 
 func (e familyContentEntry) toFileItem(path string) domain.FileItem {
 	return domain.FileItem{
-		ID:     e.ContentID,
+		ID:     encodeFamilyItemID(e.ContentID, path),
 		Name:   e.ContentName,
 		Size:   e.ContentSize,
 		IsDir:  false,

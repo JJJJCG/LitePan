@@ -17,7 +17,7 @@ const (
 )
 
 func (d *Driver) ResolveDownload(ctx context.Context, req driver.DownloadRequest) (*domain.DownloadInfo, error) {
-	contentID := strings.TrimSpace(req.FileID)
+	contentID, parentPath := splitFamilyItemID(strings.TrimSpace(req.FileID))
 	if contentID == "" {
 		return nil, domain.Errorf(domain.CodeValidation, "content_id 不能为空")
 	}
@@ -25,6 +25,7 @@ func (d *Driver) ResolveDownload(ctx context.Context, req driver.DownloadRequest
 	var data downloadURLData
 	if err := d.familyAPIRequest(ctx, familyGetDownloadURL, map[string]any{
 		"contentID": contentID,
+		"path":      parentPath,
 	}, &data); err != nil {
 		return nil, err
 	}
@@ -144,7 +145,7 @@ func (d *Driver) CopyFiles(ctx context.Context, fileIDs []string, targetParentID
 }
 
 func (d *Driver) RenameFile(ctx context.Context, fileID, newName string) error {
-	fileID = strings.TrimSpace(fileID)
+	fileID, _ = splitFamilyItemID(strings.TrimSpace(fileID))
 	newName = strings.TrimSpace(newName)
 	if fileID == "" {
 		return domain.Errorf(domain.CodeValidation, "file_id 不能为空")
@@ -173,14 +174,15 @@ func (d *Driver) RenameFile(ctx context.Context, fileID, newName string) error {
 func (d *Driver) splitCatalogContent(fileIDs []string) ([]catalogInfo, []contentInfo) {
 	catalogs := make([]catalogInfo, 0)
 	contents := make([]contentInfo, 0)
-	for _, id := range fileIDs {
-		if id == "" {
+	for _, encoded := range fileIDs {
+		if encoded == "" {
 			continue
 		}
+		id, path := splitFamilyItemID(encoded)
 		// 暂不区分目录/文件类型，统一按 contentList 提交
 		contents = append(contents, contentInfo{
 			ContentID: id,
-			Path:      "",
+			Path:      path,
 		})
 	}
 	return catalogs, contents
