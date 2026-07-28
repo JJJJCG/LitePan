@@ -67,12 +67,12 @@ func (d *Driver) queryRoutePolicy(ctx context.Context, modName string) (string, 
 		"modAddrType": 1,
 	}
 	var route routePolicyData
-	err := d.signedRequest(ctx, routePolicyURL, signScopePersonal, body, &route)
+	err := d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
 	if isAuthError(err) {
 		if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
 			return "", refreshErr
 		}
-		err = d.signedRequest(ctx, routePolicyURL, signScopePersonal, body, &route)
+		err = d.signedRequest(ctx, routePolicyURL, signScopeFamily, body, &route)
 	}
 	if err != nil {
 		return "", err
@@ -194,7 +194,7 @@ func (d *Driver) signedHeaders(authorization, ts, randomValue, sign string, scop
 		"Accept":                 "application/json, text/plain, */*",
 		"Authorization":          "Basic " + normalizeAuthorization(authorization),
 		"CMS-DEVICE":             "default",
-		"Content-Type":           "application/json;charset=UTF-8",
+		"Content-Type":           "application/json",
 		"Inner-Hcy-Router-Https": "1",
 		"mcloud-channel":         "1000101",
 		"mcloud-client":          "10701",
@@ -223,7 +223,7 @@ func (d *Driver) uploadSignedHeaders(authorization, ts, randomValue, sign string
 		"Accept":                 "application/json, text/plain, */*",
 		"Authorization":          "Basic " + normalizeAuthorization(authorization),
 		"CMS-DEVICE":             "default",
-		"Content-Type":           "application/json;charset=UTF-8",
+		"Content-Type":           "application/json",
 		"Inner-Hcy-Router-Https": "1",
 		"Caller":                 "web",
 		"mcloud-channel":         "1000101",
@@ -319,20 +319,17 @@ func (d *Driver) familyUploadAPIRequest(ctx context.Context, path string, body m
 }
 
 // familyAPIRequest 是家庭云 API 的统一入口：注入通用参数 → 签名 → 请求 → 自动刷新重试。
-// 使用 GroupCloudHost（列表/下载/删除/上传等主操作）。
+// 对齐 OpenList 的 post() —— 使用固定域名 yun.139.com（列表/下载/删除等主操作）。
 func (d *Driver) familyAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
-	if d.groupHost == "" {
-		return domain.Errorf(domain.CodeDriverError, "移动家庭云尚未获取 API 主机地址")
-	}
 	enriched := d.familyNewJson(body)
-	err := d.signedRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
+	err := d.signedRequest(ctx, webOrigin+path, signScopeFamily, enriched, out)
 	if !isAuthError(err) {
 		return err
 	}
 	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
 		return refreshErr
 	}
-	return d.signedRequest(ctx, d.groupHost+path, signScopeFamily, enriched, out)
+	return d.signedRequest(ctx, webOrigin+path, signScopeFamily, enriched, out)
 }
 
 // familyAndAlbumRequest 是 AndAlbum 接口（移动/复制/重命名）的统一入口。
@@ -354,14 +351,14 @@ func (d *Driver) familyAndAlbumRequest(ctx context.Context, path string, body ma
 
 // isboAPIRequest 是 ISBO 接口（移动/复制）的统一入口。
 func (d *Driver) isboAPIRequest(ctx context.Context, path string, body map[string]any, out any) error {
-	err := d.signedRequest(ctx, isboBaseURL+path, signScopePersonal, body, out)
+	err := d.signedRequest(ctx, isboBaseURL+path, signScopeFamily, body, out)
 	if !isAuthError(err) {
 		return err
 	}
 	if _, refreshErr := d.refreshAuthorization(ctx, true); refreshErr != nil {
 		return refreshErr
 	}
-	return d.signedRequest(ctx, isboBaseURL+path, signScopePersonal, body, out)
+	return d.signedRequest(ctx, isboBaseURL+path, signScopeFamily, body, out)
 }
 
 const isboBaseURL = "https://group.yun.139.com/hcy/mutual/adapter"
