@@ -22,7 +22,7 @@
 <br>
 
 > [!CAUTION]
-> 当前仓库是正在开发中的 **Go 版 LitePan**，首次发布可能问题较多，请谨慎测试。
+> 当前仓库是正在开发中的 **Go 版 LitePan**，首次发布可能问题较多，请谨慎测试。添加移动云盘家庭云驱动。
 > Python 旧版已归档至 [LitePan-old](https://github.com/Ponphil/LitePan-old)。
 
 
