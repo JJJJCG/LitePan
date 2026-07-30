@@ -18,10 +18,35 @@ func (h *Handler) crossTransferRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 type crossTransferScanReq struct {
-	SourceAccountID    int64  `json:"source_account_id"`
-	SourceParentID     string `json:"source_parent_id"`
-	Method             string `json:"method"`
-	SourceDisplayPath  string `json:"source_display_path"`
+	SourceAccountID   int64                     `json:"source_account_id"`
+	SourceParentID    string                    `json:"source_parent_id"`
+	Method            string                    `json:"method"`
+	SourceDisplayPath string                    `json:"source_display_path"`
+	Sources           []crossTransferScanSource `json:"sources"`
+}
+
+type crossTransferScanSource struct {
+	ParentID    string   `json:"parent_id"`
+	DisplayPath string   `json:"display_path"`
+	AncestorIDs []string `json:"ancestor_ids"`
+}
+
+func (r crossTransferScanReq) roots() []crosstransfer.ScanRoot {
+	if len(r.Sources) == 0 {
+		return []crosstransfer.ScanRoot{{
+			ParentID:    r.SourceParentID,
+			DisplayPath: r.SourceDisplayPath,
+		}}
+	}
+	roots := make([]crosstransfer.ScanRoot, 0, len(r.Sources))
+	for _, source := range r.Sources {
+		roots = append(roots, crosstransfer.ScanRoot{
+			ParentID:    source.ParentID,
+			DisplayPath: source.DisplayPath,
+			AncestorIDs: source.AncestorIDs,
+		})
+	}
+	return roots
 }
 
 func (h *Handler) crossTransferScan(w http.ResponseWriter, r *http.Request) {
@@ -33,12 +58,32 @@ func (h *Handler) crossTransferScan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	result, err := h.crossTransfer.ScanSource(r.Context(), req.SourceAccountID, req.SourceParentID, req.Method, req.SourceDisplayPath)
+	result, err := h.crossTransfer.ScanSources(r.Context(), req.SourceAccountID, req.roots(), req.Method)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeOK(w, result)
+}
+
+func (h *Handler) crossTransferScanStream(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.crossTransfer != nil) {
+		return
+	}
+	var req crossTransferScanReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	h.streamCrossTransferNDJSON(w, r, func(emit func(crosstransfer.StreamEvent) error) error {
+		return h.crossTransfer.ScanSourcesStream(
+			r.Context(),
+			req.SourceAccountID,
+			req.roots(),
+			req.Method,
+			emit,
+		)
+	})
 }
 
 type crossTransferProbeFile struct {
@@ -91,18 +136,18 @@ type crossTransferTransferFile struct {
 }
 
 type crossTransferExecuteReq struct {
-	SourceAccountID    int64                       `json:"source_account_id"`
-	SourceAccountName  string                      `json:"source_account_name"`
-	SourceDriverType   string                      `json:"source_driver_type"`
-	TargetAccountID    int64                       `json:"target_account_id"`
-	TargetAccountName  string                      `json:"target_account_name"`
-	TargetDriverType   string                      `json:"target_driver_type"`
-	TargetParentID     string                      `json:"target_parent_id"`
-	TargetDisplayPath  string                      `json:"target_display_path"`
-	Method             string                      `json:"method"`
-	Files              []crossTransferTransferFile `json:"files"`
-	Conflict           string                      `json:"conflict"`
-	Fallback           bool                        `json:"fallback"`
+	SourceAccountID   int64                       `json:"source_account_id"`
+	SourceAccountName string                      `json:"source_account_name"`
+	SourceDriverType  string                      `json:"source_driver_type"`
+	TargetAccountID   int64                       `json:"target_account_id"`
+	TargetAccountName string                      `json:"target_account_name"`
+	TargetDriverType  string                      `json:"target_driver_type"`
+	TargetParentID    string                      `json:"target_parent_id"`
+	TargetDisplayPath string                      `json:"target_display_path"`
+	Method            string                      `json:"method"`
+	Files             []crossTransferTransferFile `json:"files"`
+	Conflict          string                      `json:"conflict"`
+	Fallback          bool                        `json:"fallback"`
 }
 
 func (h *Handler) crossTransferExecute(w http.ResponseWriter, r *http.Request) {

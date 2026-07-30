@@ -125,7 +125,7 @@
         <div class="panel-pick">
           <button class="combo" @click="openPicker('src')">
             <span class="c-ic"><i class="fas fa-hdd"></i></span>
-            <span class="c-text" :class="{ placeholder: !src }">{{ src ? (src.accName + ' · ' + src.path) : '选择账号 · 目录' }}</span>
+            <span class="c-text" :class="{ placeholder: !src }" :title="srcPickerTitle">{{ srcPickerText }}</span>
             <span class="c-caret"><i class="fas fa-chevron-down"></i></span>
           </button>
         </div>
@@ -330,7 +330,10 @@
       :accounts="pickerAccounts"
       :account-id="pickerInitialAccountId"
       :initial-path="pickerInitialPath"
+      :multi-select="pickerMode === 'src'"
+      :initial-selections="pickerMode === 'src' ? pickerInitialSelections : []"
       :title="pickerMode === 'src' ? '选择源目录' : '选择目标目录'"
+      :confirm-text="pickerMode === 'src' ? '确认选择' : '选择当前目录'"
       show-refresh
       @close="pickerOpen = false"
       @resolve="onPickerResolve"
@@ -350,7 +353,7 @@ import {
   executeCrossTransferStream,
   listCrossTransferRoutes,
   probeCrossTransferStream,
-  scanCrossTransferSource,
+  scanCrossTransferSourceStream,
 } from "@/api/crossTransfer";
 import { useConfirm } from "@/composables/useConfirm";
 import { toast } from "@/composables/useToast";
@@ -401,12 +404,14 @@ const metrics = reactive({ total: 0, ok: 0, no: 0, done: 0 })
 const relayNotice = ref(null)
 const phaseStatus = ref('')
 const scanSummary = ref(null)
+const scanLimitReason = ref('')
 
 const pickerOpen = ref(false)
 const pickerMode = ref('src')
 const pickerAccounts = ref([])
 const pickerInitialAccountId = ref(null)
 const pickerInitialPath = ref('')
+const pickerInitialSelections = ref([])
 
 const relayTasksHref = computed(() => (
   router.resolve({ path: '/', query: { taskPanel: 'relay' } }).href
@@ -417,6 +422,15 @@ const showFooterScrollTips = computed(() => !showProgressBar.value && !relayNoti
 const currentFooterTip = computed(() => footerScrollTips[footerTipIndex.value] || footerScrollTips[0])
 const isScanPhase = computed(() => phaseStatus.value.includes('扫描'))
 const isBaiduMd5Route = computed(() => curRoute.value?.method === 'md5' && srcDriver.value === 'baidu_open')
+const sourceRoots = computed(() => Array.isArray(src.value?.sources) ? src.value.sources : [])
+const srcPickerText = computed(() => {
+  if (!src.value) return '选择账号 · 目录'
+  if (sourceRoots.value.length === 1) return `${src.value.accName} · ${sourceRoots.value[0].path}`
+  return `${src.value.accName} · 已选 ${sourceRoots.value.length} 个目录`
+})
+const srcPickerTitle = computed(() => (
+  src.value ? sourceRoots.value.map(item => item.path).join('\n') : ''
+))
 
 const accounts = ref([])
 const srcTreeRef = ref(null)
@@ -479,6 +493,7 @@ function clearSourceSelection() {
   srcTree.value = null
   probeFiles.value = []
   scanSummary.value = null
+  scanLimitReason.value = ''
   phaseStatus.value = ''
   metrics.total = 0
   metrics.ok = 0
@@ -490,13 +505,26 @@ function buildScanSummary(scan) {
   const files = scan?.total || 0
   const folders = scan?.shallow_dirs || 0
   if (files <= 0) return null
-  const warn = folders > SOFT_FOLDER_LIMIT
+  const warn = Boolean(scan?.truncated) || folders > SOFT_FOLDER_LIMIT
   const pending = (scan?.files || []).filter(f => !f.hash && f.source_file_id).length
   let text = `已扫描 ${files} 个文件`
   if (folders) text += `、${folders} 个子文件夹（一至二级合计）`
   if (pending && isBaiduMd5Route.value) text += `，${pending} 个待试探时计算指纹`
-  text += warn ? '。子文件夹较多，扫描较慢，建议缩小范围或分批传输。' : '。'
+  if (scan?.truncated) {
+    text += `。${scan.truncated_reason || '扫描结果不完整'}，已禁止继续试探或传输。`
+  } else {
+    text += warn ? '。子文件夹较多，扫描较慢，建议缩小范围或分批传输。' : '。'
+  }
   return { text, warn }
+}
+
+function ensureCompleteScan(scan = null) {
+  const reason = scan?.truncated
+    ? (scan.truncated_reason || '扫描结果不完整')
+    : scanLimitReason.value
+  if (!reason) return true
+  notify('error', `${reason}，已禁止继续试探或传输，请选择更小的源目录`)
+  return false
 }
 
 function isProbeNoticeDismissed() {
@@ -656,6 +684,7 @@ function swap() {
 
 function stopRun() {
   if (!running.value) return
+  phaseStatus.value = ''
   try { abortCtrl.value?.abort() } catch {}
 }
 
@@ -671,25 +700,52 @@ async function openPicker(mode) {
   pickerMode.value = mode;
   pickerAccounts.value = accs;
   pickerInitialAccountId.value = Number(cur?.accId || accs[0]?.id || 0) || null;
-  pickerInitialPath.value = cur?.path || "";
+  pickerInitialPath.value = mode === 'src'
+    ? (cur?.sources?.length === 1 ? cur.sources[0].path : '')
+    : (cur?.path || '');
+  pickerInitialSelections.value = mode === 'src'
+    ? (cur?.sources || []).map(item => ({
+      id: item.parentId,
+      name: item.name,
+      path: item.path,
+      ancestorIds: [...(item.ancestorIds || [])],
+    }))
+    : [];
   pickerOpen.value = true;
 }
 
 function onPickerResolve(payload) {
   pickerOpen.value = false;
-  const sel = {
-    accId: payload.accountId,
-    accName: payload.accountName,
-    parentId: payload.parentId,
-    path: payload.path,
-  };
   if (pickerMode.value === "src") {
-    src.value = sel;
+    const selected = Array.isArray(payload.selections) && payload.selections.length
+      ? payload.selections
+      : [{
+        id: payload.parentId,
+        name: payload.path.split('/').filter(Boolean).pop() || '根目录',
+        path: payload.path,
+        ancestorIds: [],
+      }]
+    src.value = {
+      accId: payload.accountId,
+      accName: payload.accountName,
+      sources: selected.map(item => ({
+        parentId: item.id,
+        name: item.name,
+        path: item.path || '/',
+        ancestorIds: [...(item.ancestorIds || [])],
+      })),
+    };
     srcTree.value = null;
     probeFiles.value = [];
     scanSummary.value = null;
+    scanLimitReason.value = '';
   } else {
-    dst.value = sel;
+    dst.value = {
+      accId: payload.accountId,
+      accName: payload.accountName,
+      parentId: payload.parentId,
+      path: payload.path,
+    };
   }
   dstTree.value = null;
   resetMetrics();
@@ -701,18 +757,37 @@ async function scanSource(clearTree = true) {
     srcTree.value = null
     resetMetrics()
     scanSummary.value = null
+    scanLimitReason.value = ''
   }
   phaseStatus.value = '正在扫描源目录…'
+  let scan = null
+  let streamError = ''
   try {
-    const scan = await scanCrossTransferSource({
+    for await (const msg of scanCrossTransferSourceStream({
       source_account_id: Number(src.value.accId),
-      source_parent_id: src.value.parentId,
-      source_display_path: src.value.path || "",
+      sources: sourceRoots.value.map(item => ({
+        parent_id: item.parentId,
+        display_path: item.path || '/',
+        ancestor_ids: item.ancestorIds || [],
+      })),
       method: curRoute.value.method,
-    });
+    }, abortCtrl.value?.signal)) {
+      if (msg.event === 'progress') {
+        const directories = Number(msg.directories || 0)
+        const files = Number(msg.files || 0)
+        phaseStatus.value = `正在扫描源目录…已扫描 ${directories} 个目录、${files} 个文件`
+      } else if (msg.event === 'end') {
+        scan = msg.result
+      } else if (msg.event === 'error') {
+        streamError = String(msg.message || '扫描失败')
+      }
+    }
+    if (streamError) throw new Error(streamError)
+    if (!scan) throw new Error('扫描未返回结果')
     decorateTree(scan.tree)
     srcTree.value = scan.tree
     probeFiles.value = orderFilesByTree(scan.files || [])
+    scanLimitReason.value = scan.truncated ? (scan.truncated_reason || '扫描结果不完整') : ''
     metrics.total = scan.total
     if (clearTree) {
       metrics.ok = 0
@@ -720,7 +795,7 @@ async function scanSource(clearTree = true) {
       metrics.done = 0
     }
     scanSummary.value = buildScanSummary(scan)
-    if (scan.truncated) notify('warning', `文件较多，仅扫描前 ${scan.total} 个`)
+    if (scan.truncated) notify('error', `${scanLimitReason.value}，已禁止继续试探或传输`)
     if (running.value) phaseStatus.value = ''
     return scan
   } catch (e) {
@@ -741,6 +816,11 @@ async function probe() {
 
   const scan = await scanSource(true)
   if (!scan) {
+    running.value = ''
+    barWidth.value = 0
+    return
+  }
+  if (!ensureCompleteScan(scan)) {
     running.value = ''
     barWidth.value = 0
     return
@@ -849,12 +929,22 @@ async function start() {
       barWidth.value = 0
       return
     }
+    if (!ensureCompleteScan(scan)) {
+      running.value = ''
+      barWidth.value = 0
+      return
+    }
     if (!(await confirmLargeBatch(scan))) {
       clearSourceSelection()
       running.value = ''
       barWidth.value = 0
       return
     }
+  }
+  if (!ensureCompleteScan()) {
+    running.value = ''
+    barWidth.value = 0
+    return
   }
 
   const files = orderFilesByTree(probeFiles.value.filter(f => f.hash || f.source_file_id))
@@ -1045,6 +1135,7 @@ function reset() {
   clearRelayNotice()
   phaseStatus.value = ''
   scanSummary.value = null
+  scanLimitReason.value = ''
   src.value = null
   dst.value = null
   srcTree.value = null
@@ -1185,6 +1276,7 @@ onMounted(() => {
   })
 })
 onUnmounted(() => {
+  abortCtrl.value?.abort()
   stopFooterTipTimer()
   flowResizeObserver?.disconnect()
   document.removeEventListener('click', onDocClick)
@@ -1463,10 +1555,10 @@ onUnmounted(() => {
 }
 .tree-phase-card {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  max-width: 240px; padding: 8px 12px; text-align: center;
+  width: min(520px, calc(100% - 24px)); padding: 8px 12px; text-align: center;
 }
 .tree-phase-spin { color: var(--primary-color); }
-.tree-phase-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--text-main); }
+.tree-phase-title { margin: 0; max-width: 100%; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--text-main); }
 .tree-phase-sub { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
 .tree-phase-bar {
   width: 160px; height: 4px; border-radius: var(--radius-pill); overflow: hidden;

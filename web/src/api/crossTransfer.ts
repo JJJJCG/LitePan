@@ -30,9 +30,25 @@ export interface CrossTransferScanFile {
 export interface CrossTransferScanResult {
   tree: unknown[];
   total: number;
+  directories: number;
   shallow_dirs: number;
   truncated: boolean;
+  truncated_reason?: string;
   files: CrossTransferScanFile[];
+}
+
+export interface CrossTransferScanSource {
+  parent_id: string;
+  display_path: string;
+  ancestor_ids?: string[];
+}
+
+export interface CrossTransferScanRequest {
+  source_account_id: number;
+  method: string;
+  sources?: CrossTransferScanSource[];
+  source_parent_id?: string;
+  source_display_path?: string;
 }
 
 export interface CrossTransferRelayTask {
@@ -70,13 +86,15 @@ export function listCrossTransferRoutes() {
   return http.get<CrossTransferRoute[]>("/cross-transfer/routes");
 }
 
-export function scanCrossTransferSource(body: {
-  source_account_id: number;
-  source_parent_id: string;
-  method: string;
-  source_display_path?: string;
-}) {
+export function scanCrossTransferSource(body: CrossTransferScanRequest) {
   return http.post<CrossTransferScanResult>("/cross-transfer/scan", body);
+}
+
+export function scanCrossTransferSourceStream(
+  body: CrossTransferScanRequest,
+  signal?: AbortSignal,
+) {
+  return streamCrossTransferNDJSON<Record<string, unknown>>("/cross-transfer/scan/stream", body, signal);
 }
 
 export async function* streamCrossTransferNDJSON<T extends Record<string, unknown>>(
