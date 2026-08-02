@@ -1,18 +1,17 @@
 name: Build & Push Docker Image
 
 on:
-  workflow_dispatch: # 仅手动触发
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # 允许推送到 GHCR
+      packages: write
 
     steps:
       - name: Checkout
@@ -31,13 +30,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 从源码提取版本号作为镜像标签
-      - name: Extract version
-        id: version
+      - name: Extract version and image name
+        id: meta
         run: |
+          # 提取版本号
           VER=$(grep -oP 'AppVersion\s*=\s*"\K[^"]+' internal/httpx/user_agent.go)
+          
+          # 转换为小写镜像名
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${{ env.REGISTRY }}/$REPO_LOWER"
+          
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          
+          # 打印调试信息
+          echo "Version: $VER"
+          echo "Image: $IMAGE"
 
       - name: Build & push
         uses: docker/build-push-action@v6
@@ -45,9 +53,9 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}
-            ${{ steps.version.outputs.image }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # 如果要同时支持 amd64 + arm64（如 NAS），去掉下面注释
-          # platforms: linux/amd64,linux/arm64
+          # 多架构支持（用于树莓派/NAS）
+          platforms: linux/amd64,linux/arm64
