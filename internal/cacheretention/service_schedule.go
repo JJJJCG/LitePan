@@ -38,48 +38,43 @@ func (s *Service) scheduleOnce(ctx context.Context) {
 	strmBusy := s.snapshotBusyAccounts()
 
 	s.mu.Lock()
-	if len(s.runningAccounts) > 0 {
+	pick := s.pickScheduledTaskLocked(ctx, tasks, now, strmBusy)
+	if pick == nil {
 		s.mu.Unlock()
 		return
 	}
-	var pick *domain.CacheRetentionTask
+	s.mu.Unlock()
+	s.runTaskAsync(pick)
+}
+
+func (s *Service) pickScheduledTaskLocked(ctx context.Context, tasks []*domain.CacheRetentionTask, now time.Time, busyAccounts map[int64]struct{}) *domain.CacheRetentionTask {
 	for _, t := range tasks {
-		if t.Status != domain.RetentionStatusRunning {
+		if t == nil || t.Status != domain.RetentionStatusRunning {
 			continue
 		}
 		if s.running[t.ID] {
 			continue
 		}
+		if _, running := s.runningAccounts[t.AccountID]; running {
+			continue
+		}
 		if !IsInTimeWindow(t, now) {
 			continue
 		}
-		if accountBusy(strmBusy, t.AccountID) {
+		if accountBusy(busyAccounts, t.AccountID) {
 			continue
 		}
 		if s.accountCacheDisabled(ctx, t.AccountID) {
 			continue
 		}
-		ttl := s.accountCacheTTL(ctx, t.AccountID)
 		_, pending := s.pendingRun[t.ID]
-		if !pending {
-			if last, ok := s.accountLastDone[t.AccountID]; ok && ttl > 0 && now.Sub(last) < ttl {
-				continue
-			}
-		}
 		next, hasNext := s.nextRun[t.ID]
 		if !pending && (!hasNext || next.After(now)) {
 			continue
 		}
-		pick = t
-		break
+		return t
 	}
-	if pick == nil {
-		s.mu.Unlock()
-		return
-	}
-	delete(s.pendingRun, pick.ID)
-	s.mu.Unlock()
-	s.runTaskAsync(pick)
+	return nil
 }
 
 func (s *Service) isAccountBusy(accountID int64) bool {
@@ -120,14 +115,18 @@ func accountBusy(set map[int64]struct{}, accountID int64) bool {
 	return ok
 }
 
-func (s *Service) runTaskAsync(task *domain.CacheRetentionTask) {
+func (s *Service) runTaskAsync(task *domain.CacheRetentionTask) bool {
 	if task == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	if s.running[task.ID] {
 		s.mu.Unlock()
-		return
+		return false
+	}
+	if _, running := s.runningAccounts[task.AccountID]; running {
+		s.mu.Unlock()
+		return false
 	}
 	runCtx, cancel := context.WithCancel(s.appCtx)
 	s.running[task.ID] = true
@@ -135,6 +134,7 @@ func (s *Service) runTaskAsync(task *domain.CacheRetentionTask) {
 	s.runningTaskAcct[task.ID] = task.AccountID
 	s.taskCancels[task.ID] = cancel
 	s.liveStats[task.ID] = scanStats{}
+	delete(s.pendingRun, task.ID)
 	s.mu.Unlock()
 	s.log.Info("缓存任务开始执行",
 		"task_id", task.ID,
@@ -162,7 +162,6 @@ func (s *Service) runTaskAsync(task *domain.CacheRetentionTask) {
 		delete(s.taskCancels, task.ID)
 		delete(s.runningAccounts, task.AccountID)
 		delete(s.runningTaskAcct, task.ID)
-		s.accountLastDone[task.AccountID] = time.Now()
 		delete(s.liveStats, task.ID)
 		s.nextRun[task.ID] = time.Now().Add(time.Duration(task.RefreshInterval) * time.Minute)
 		s.mu.Unlock()
@@ -194,6 +193,7 @@ func (s *Service) runTaskAsync(task *domain.CacheRetentionTask) {
 		})
 		s.notifyLargeScope(task, stats)
 	}()
+	return true
 }
 
 func (s *Service) handleRunError(ctx context.Context, task *domain.CacheRetentionTask, err error, durationMS int) {

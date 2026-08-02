@@ -33,7 +33,6 @@ type Service struct {
 	runningTaskAcct map[int64]int64
 	taskCancels     map[int64]context.CancelFunc
 	nextRun         map[int64]time.Time
-	accountLastDone map[int64]time.Time
 	pendingRun      map[int64]struct{}
 	liveStats       map[int64]scanStats
 	strmBusy        RunningAccountLister
@@ -72,7 +71,6 @@ func NewService(opts Options) *Service {
 		runningTaskAcct: make(map[int64]int64),
 		taskCancels:     make(map[int64]context.CancelFunc),
 		nextRun:         make(map[int64]time.Time),
-		accountLastDone: make(map[int64]time.Time),
 		pendingRun:      make(map[int64]struct{}),
 		liveStats:       make(map[int64]scanStats),
 	}
@@ -216,11 +214,6 @@ func (s *Service) loadNextRuns(ctx context.Context) {
 		if t.Status != domain.RetentionStatusRunning {
 			continue
 		}
-		if t.LastRefresh != nil {
-			if prev, ok := s.accountLastDone[t.AccountID]; !ok || t.LastRefresh.After(prev) {
-				s.accountLastDone[t.AccountID] = *t.LastRefresh
-			}
-		}
 		if t.LastRefresh != nil && t.RefreshInterval > 0 {
 			s.nextRun[t.ID] = t.LastRefresh.Add(time.Duration(t.RefreshInterval) * time.Minute)
 		} else {
@@ -233,11 +226,11 @@ func (s *Service) notifyLargeScope(task *domain.CacheRetentionTask, stats scanSt
 	if s.bus == nil || task == nil || task.IgnoreLargeScopeWarn {
 		return
 	}
-	if stats.APICalls < 50 || stats.SkipCalls*2 >= stats.APICalls {
+	if stats.APICalls < 500 || stats.SkipCalls*2 >= stats.APICalls {
 		return
 	}
 	title := "缓存保持任务范围过大"
-	msg := "缓存保持任务「" + task.Path + "」覆盖范围过大，存在风控风险，请尽快手动修改任务，只绑定常用子目录。"
+	msg := "该任务扫描范围过大，继续执行意义不大，还可能增加网盘访问压力，建议尽快改为常用子目录。"
 	s.bus.Publish(context.Background(), eventbus.NotificationCreated{
 		Level:     "warning",
 		Category:  domain.NotificationCategoryCacheScopeWarn,

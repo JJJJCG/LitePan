@@ -331,7 +331,6 @@
       :account-id="pickerInitialAccountId"
       :initial-path="pickerInitialPath"
       :multi-select="pickerMode === 'src'"
-      :initial-selections="pickerMode === 'src' ? pickerInitialSelections : []"
       :initial-location-mode="pickerMode === 'src' ? 'root' : 'preserve'"
       :selection-restore-mode="pickerMode === 'src' ? 'reset' : 'preserve'"
       :title="pickerMode === 'src' ? '选择源目录' : '选择目标目录'"
@@ -345,7 +344,17 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
+import {
+  ref,
+  reactive,
+  computed,
+  onMounted,
+  onUnmounted,
+  onActivated,
+  onDeactivated,
+  nextTick,
+  watch,
+} from "vue";
 import { useRouter } from "vue-router";
 import CrossTransferTree from "./CrossTransferTree.vue";
 import BusySpinner from "@/components/base/BusySpinner.vue";
@@ -399,6 +408,7 @@ const settingsDropdownStyle = ref({})
 const SETTINGS_DROPDOWN_WIDTH = 304
 const footerTipIndex = ref(0)
 let footerTipTimer = null
+let uiActive = false
 const running = ref('')
 const abortCtrl = ref(null)
 const barWidth = ref(0)
@@ -413,7 +423,6 @@ const pickerMode = ref('src')
 const pickerAccounts = ref([])
 const pickerInitialAccountId = ref(null)
 const pickerInitialPath = ref('')
-const pickerInitialSelections = ref([])
 
 const relayTasksHref = computed(() => (
   router.resolve({ path: '/', query: { taskPanel: 'relay' } }).href
@@ -702,17 +711,7 @@ async function openPicker(mode) {
   pickerMode.value = mode;
   pickerAccounts.value = accs;
   pickerInitialAccountId.value = Number(cur?.accId || accs[0]?.id || 0) || null;
-  pickerInitialPath.value = mode === 'src'
-    ? (cur?.sources?.length === 1 ? cur.sources[0].path : '')
-    : (cur?.path || '');
-  pickerInitialSelections.value = mode === 'src'
-    ? (cur?.sources || []).map(item => ({
-      id: item.parentId,
-      name: item.name,
-      path: item.path,
-      ancestorIds: [...(item.ancestorIds || [])],
-    }))
-    : [];
+  pickerInitialPath.value = mode === 'src' ? '' : (cur?.path || '');
   pickerOpen.value = true;
 }
 
@@ -1258,33 +1257,52 @@ watch(targetRenameUnsupported, (unsupported) => {
   if (unsupported && conflict.value === 'rename') conflict.value = 'overwrite'
 })
 watch(showFooterScrollTips, (show) => {
+  if (!uiActive) return
   if (show) startFooterTipTimer()
   else stopFooterTipTimer()
-}, { immediate: true })
+})
+
+function activateUi() {
+  if (uiActive) return
+  uiActive = true
+  document.addEventListener('click', onDocClick)
+  window.addEventListener('scroll', onSettingsReposition, true)
+  window.addEventListener('resize', onSettingsReposition)
+  window.addEventListener('resize', updateFlowScrollState)
+  if (showFooterScrollTips.value) startFooterTipTimer()
+  nextTick(() => {
+    updateFlowScrollState()
+    if (typeof ResizeObserver === 'undefined' || !flowGridRef.value) return
+    flowResizeObserver?.disconnect()
+    flowResizeObserver = new ResizeObserver(updateFlowScrollState)
+    flowResizeObserver.observe(flowGridRef.value)
+  })
+}
+
+function deactivateUi() {
+  if (!uiActive) return
+  uiActive = false
+  settingsOpen.value = false
+  pickerOpen.value = false
+  stopFooterTipTimer()
+  flowResizeObserver?.disconnect()
+  flowResizeObserver = null
+  document.removeEventListener('click', onDocClick)
+  window.removeEventListener('scroll', onSettingsReposition, true)
+  window.removeEventListener('resize', onSettingsReposition)
+  window.removeEventListener('resize', updateFlowScrollState)
+}
 
 onMounted(() => {
   loadCtSettings()
   loadRoutes()
   loadAccounts()
-  document.addEventListener('click', onDocClick)
-  window.addEventListener('scroll', onSettingsReposition, true)
-  window.addEventListener('resize', onSettingsReposition)
-  window.addEventListener('resize', updateFlowScrollState)
-  nextTick(() => {
-    updateFlowScrollState()
-    if (typeof ResizeObserver === 'undefined' || !flowGridRef.value) return
-    flowResizeObserver = new ResizeObserver(updateFlowScrollState)
-    flowResizeObserver.observe(flowGridRef.value)
-  })
 })
+onActivated(activateUi)
+onDeactivated(deactivateUi)
 onUnmounted(() => {
   abortCtrl.value?.abort()
-  stopFooterTipTimer()
-  flowResizeObserver?.disconnect()
-  document.removeEventListener('click', onDocClick)
-  window.removeEventListener('scroll', onSettingsReposition, true)
-  window.removeEventListener('resize', onSettingsReposition)
-  window.removeEventListener('resize', updateFlowScrollState)
+  deactivateUi()
 })
 </script>
 

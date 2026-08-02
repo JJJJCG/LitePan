@@ -314,13 +314,20 @@ func (m *metadataSyncer) downloadResolvedWithRetry(
 			}
 			res = refreshed
 		}
-		if res.Link.URL == "" {
-			lastErr = fmt.Errorf("无下载地址")
-			continue
-		}
 		size := res.File.Size
 		if size <= 0 && res.Link.Size > 0 {
 			size = res.Link.Size
+		}
+		if localPath := strings.TrimSpace(res.Link.LocalPath); localPath != "" {
+			body, err := readMetadataLocalFile(ctx, localPath, size)
+			if err != nil {
+				return nil, fmt.Errorf("读取本地元数据失败: %w", err)
+			}
+			return body, nil
+		}
+		if res.Link.URL == "" {
+			lastErr = fmt.Errorf("无下载地址")
+			continue
 		}
 		body, err := fetchMetadataURLWithRetry(ctx, client, res.Link.URL, res.Link.Headers, size)
 		if err == nil {
@@ -332,6 +339,23 @@ func (m *metadataSyncer) downloadResolvedWithRetry(
 		lastErr = fmt.Errorf("元数据下载失败")
 	}
 	return nil, lastErr
+}
+
+func readMetadataLocalFile(ctx context.Context, localPath string, expectedSize int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	body, err := os.ReadFile(localPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if expectedSize > 0 && int64(len(body)) != expectedSize {
+		return nil, fmt.Errorf("文件大小不一致: expected=%d, got=%d", expectedSize, len(body))
+	}
+	return body, nil
 }
 
 func (m *metadataSyncer) downloadWithRetry(ctx context.Context, client *http.Client, accountID int64, fileID string, expectedSize int64) ([]byte, error) {
@@ -510,34 +534,39 @@ func alignMetadataItems(outputFolder string, media []mediaCandidate, items []met
 	for i, item := range items {
 		out[i] = item
 		for _, stem := range isoStems[dirKey(item.relDirs)] {
-			if !hasMetadataStemPrefix(item.fileName, stem) {
+			alignedName, changed := alignISOMetadataName(item.fileName, stem)
+			if !changed {
 				continue
 			}
-			alignedName, changed := alignISOMetadataName(item.fileName, stem)
-			if changed {
-				out[i].legacyRelPath = item.relPath
-				out[i].relPath = metadataRelPath(outputFolder, item.relDirs, alignedName)
-				out[i].direct = false
-			}
+			out[i].legacyRelPath = item.relPath
+			out[i].relPath = metadataRelPath(outputFolder, item.relDirs, alignedName)
+			out[i].direct = false
 			break
 		}
 	}
 	return out
 }
 
-func hasMetadataStemPrefix(name, stem string) bool {
-	prefix := stem + "."
-	return len(name) > len(prefix) && strings.EqualFold(name[:len(prefix)], prefix)
-}
-
 func alignISOMetadataName(name, stem string) (string, bool) {
-	prefix := stem + "."
-	if len(name) <= len(prefix) || !strings.EqualFold(name[:len(prefix)], prefix) {
+	if len(name) <= len(stem) || !strings.EqualFold(name[:len(stem)], stem) {
 		return name, false
 	}
-	isoPrefix := stem + ".iso."
-	if strings.HasPrefix(strings.ToLower(name), strings.ToLower(isoPrefix)) {
+	suffix := name[len(stem):]
+	lowerSuffix := strings.ToLower(suffix)
+	if strings.HasPrefix(lowerSuffix, ".iso.") || strings.HasPrefix(lowerSuffix, ".iso-") {
 		return name, false
 	}
-	return name[:len(stem)] + ".iso" + name[len(stem):], true
+	if strings.HasPrefix(suffix, ".") {
+		return name[:len(stem)] + ".iso" + suffix, true
+	}
+	for _, prefix := range []string{
+		"-poster.", "-cover.", "-default.", "-movie.",
+		"-clearart.", "-banner.", "-disc.", "-cdart.",
+		"-clearlogo.", "-logo.", "-thumb.", "-landscape.",
+	} {
+		if strings.HasPrefix(lowerSuffix, prefix) {
+			return name[:len(stem)] + ".iso" + suffix, true
+		}
+	}
+	return name, false
 }
