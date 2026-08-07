@@ -44,6 +44,7 @@ type FocusableInput = {
 const BROWSER_LOCATION_STORAGE_KEY = "litepan:index:browser-location";
 const BROWSER_LOCATION_RESET_ONCE_KEY = "litepan:index:reset-once";
 const ACCOUNT_SWITCH_MODE_STORAGE_KEY = "litepan:index:account-switch-mode";
+const DRAG_UNLOCK_DURATION_MS = 600;
 
 interface BrowserLocationSnapshot {
   accountId: number;
@@ -91,6 +92,9 @@ const floatingAccountSwitchEnabled = computed(
   () => accountSwitchMode.value === "floating" && accounts.value.length > 1,
 );
 
+const browserFileLoading = computed(() => browserBootstrapping.value || loading.value);
+const showBrowserFrame = computed(() => browserBootstrapping.value || accounts.value.length > 0);
+
 const selectedAccountName = computed(
   () => accounts.value.find((a) => a.id === currentAccountId.value)?.name || "",
 );
@@ -134,6 +138,12 @@ const fileActions = useFileActions({
 });
 
 const relay = useRelayTasks();
+const offline = useOfflineDownloads({
+  selectedAccountId: currentAccountId,
+  currentParentId,
+  refreshFiles: () => store.loadFiles({ forceRefresh: true, silent: true }),
+  openDirectory: (accountId, crumbs, opts) => store.openDirectory(accountId, crumbs, opts),
+});
 const uploadApi = useUploadTasks({
   selectedAccountId: currentAccountId,
   selectedAccountName,
@@ -144,6 +154,9 @@ const uploadApi = useUploadTasks({
   files,
   uploadFileInput,
   uploadFolderInput,
+  removeFilesLocally: (ids) => store.removeFilesLocally(ids),
+  markDeletingFiles: (rowKeys) => fileActions.markExternalDeleteRows(rowKeys),
+  clearDeletingFiles: (rowKeys) => fileActions.clearExternalDeleteRows(rowKeys),
   refreshFiles: (force?: boolean) =>
     store.loadFiles({ forceRefresh: Boolean(force), silent: true }),
   loadFiles: (opts) => store.loadFiles(opts),
@@ -151,14 +164,10 @@ const uploadApi = useUploadTasks({
   selectAccount: (account: Account) => store.selectAccount(account.id),
   getRootId,
   getCurrentBreadcrumbNameParts,
+  refreshOfflineTasks: (refresh = true, quiet = false) => offline.fetchTasks(refresh, quiet),
   relay,
 });
 const { uploadTaskPanelOpen } = uploadApi;
-const offline = useOfflineDownloads({
-  selectedAccountId: currentAccountId,
-  currentParentId,
-  refreshFiles: () => store.loadFiles({ forceRefresh: true, silent: true }),
-});
 const transferTaskText = computed(() => {
   if (uploadApi.activeUploadTasks.value.length > 0 || uploadApi.activeRelayCount.value > 0) {
     return uploadApi.uploadTaskLabel.value;
@@ -169,8 +178,6 @@ const transferTaskText = computed(() => {
   if (offline.successfulTasks.value.length > 0) return `离线完成 ${offline.successfulTasks.value.length}`;
   return uploadApi.uploadTaskLabel.value;
 });
-const uploadTaskTitleText = transferTaskText;
-const uploadTaskLabelText = transferTaskText;
 
 const uploadTaskActive = computed(
   () => uploadApi.activeUploadTasks.value.length > 0 || uploadApi.activeRelayCount.value > 0 || offline.activeTasks.value.length > 0,
@@ -178,8 +185,7 @@ const uploadTaskActive = computed(
 const uploadTaskFailed = computed(
   () =>
     uploadApi.displayUploadTasks.value.some((task) => task.status === "failed") ||
-    uploadApi.runningRelayTasks.value.some((task) => task.status === "failed") ||
-    uploadApi.completedRelayTasks.value.some((task) => task.status === "failed") ||
+    uploadApi.failedRelayTasks.value.length > 0 ||
     offline.failedTasks.value.length > 0,
 );
 const uploadTaskSuccess = computed(() =>
@@ -196,7 +202,10 @@ const dragMove = reactive({
   active: false,
   files: [] as FileItem[],
   targetId: "",
+  unlockedTargetId: "",
+  lockProgress: 0,
 });
+let dragUnlockFrame: number | undefined;
 
 const transferTitle = computed(() =>
   fileActions.transfer.action === "move" ? "移动到" : "复制到",
@@ -225,9 +234,46 @@ function getCurrentDisplayPath(): string {
 }
 
 function resetDragMove() {
+  stopDragUnlock();
   dragMove.active = false;
   dragMove.files = [];
   dragMove.targetId = "";
+  dragMove.unlockedTargetId = "";
+  dragMove.lockProgress = 0;
+}
+
+function stopDragUnlock() {
+  if (dragUnlockFrame !== undefined) {
+    window.cancelAnimationFrame(dragUnlockFrame);
+    dragUnlockFrame = undefined;
+  }
+}
+
+function resetFolderDragLock(targetId = "") {
+  stopDragUnlock();
+  dragMove.targetId = targetId;
+  dragMove.unlockedTargetId = "";
+  dragMove.lockProgress = 0;
+}
+
+function startFolderDragUnlock(targetId: string) {
+  if (!dragMove.active) return;
+  if (dragMove.targetId === targetId && dragMove.unlockedTargetId === targetId) return;
+  if (dragMove.targetId === targetId && dragMove.lockProgress > 0 && dragMove.lockProgress < 1) return;
+  resetFolderDragLock(targetId);
+  const startedAt = performance.now();
+  const tick = (now: number) => {
+    if (dragMove.targetId !== targetId) return;
+    const nextProgress = Math.min(1, (now - startedAt) / DRAG_UNLOCK_DURATION_MS);
+    dragMove.lockProgress = nextProgress;
+    if (nextProgress >= 1) {
+      dragMove.unlockedTargetId = targetId;
+      dragUnlockFrame = undefined;
+      return;
+    }
+    dragUnlockFrame = window.requestAnimationFrame(tick);
+  };
+  dragUnlockFrame = window.requestAnimationFrame(tick);
 }
 
 function resolveDraggedFiles(startFile: FileItem) {
@@ -260,7 +306,7 @@ function startDragMove(file: FileItem) {
   if (!isAdmin.value) return;
   dragMove.active = true;
   dragMove.files = resolveDraggedFiles(file);
-  dragMove.targetId = "";
+  resetFolderDragLock();
 }
 
 function finishDragMove() {
@@ -269,20 +315,20 @@ function finishDragMove() {
 
 function handleFolderDragEnter(file: FileItem) {
   if (!canDropOnFolder(file)) {
-    if (dragMove.targetId === file.id) dragMove.targetId = "";
+    if (dragMove.targetId === file.id) resetFolderDragLock();
     return;
   }
-  dragMove.targetId = file.id;
+  startFolderDragUnlock(file.id);
 }
 
 function handleFolderDragLeave(file: FileItem) {
   if (dragMove.targetId === file.id) {
-    dragMove.targetId = "";
+    resetFolderDragLock();
   }
 }
 
 async function handleFolderDrop(file: FileItem) {
-  if (!canDropOnFolder(file)) {
+  if (!canDropOnFolder(file) || dragMove.unlockedTargetId !== file.id) {
     resetDragMove();
     return;
   }
@@ -296,12 +342,15 @@ function handleFavoriteDragEnter(item: BrowserFavoriteItem) {
     if (dragMove.targetId === item.id) dragMove.targetId = "";
     return;
   }
+  resetFolderDragLock(item.id);
+  dragMove.unlockedTargetId = item.id;
+  dragMove.lockProgress = 1;
   dragMove.targetId = item.id;
 }
 
 function handleFavoriteDragLeave(item: BrowserFavoriteItem) {
   if (dragMove.targetId === item.id) {
-    dragMove.targetId = "";
+    resetFolderDragLock();
   }
 }
 
@@ -489,25 +538,20 @@ async function loadPublicSystemConfig() {
   }
 }
 
-async function loadInitialTaskState() {
-  if (!isAdmin.value) return;
+async function restoreTaskPanelFromRoute() {
+  const rawPanel = typeof route.query.taskPanel === "string" ? route.query.taskPanel : "";
+  if (!rawPanel) return;
+  const nextQuery = { ...route.query };
+  delete nextQuery.taskPanel;
+  if (!isAdmin.value) {
+    await router.replace({ path: route.path, query: nextQuery });
+    return;
+  }
   try {
-    await Promise.allSettled([
-      uploadApi.fetchUploadTasks(),
-      relay.fetchRelayTasks(),
-      offline.fetchTasks(true, true),
-    ]);
-    if (relay.activeRelayCount.value > 0) {
-      await relay.openRelayMonitoring();
-    }
-    if (route.query.taskPanel === "relay") {
-      await uploadApi.openUploadTaskPanel("relay");
-      const nextQuery = { ...route.query };
-      delete nextQuery.taskPanel;
-      router.replace({ path: route.path, query: nextQuery });
-    }
-  } catch {
-    // 传输任务状态不阻塞首页首屏，失败时保持静默，轮询或用户打开面板后会再次刷新。
+    const preferredCategory = rawPanel === "relay" || rawPanel === "offline" ? rawPanel : "";
+    await uploadApi.openUploadTaskPanel(preferredCategory);
+  } finally {
+    await router.replace({ path: route.path, query: nextQuery });
   }
 }
 
@@ -515,10 +559,9 @@ async function openTaskPanel() {
   const preferOffline =
     offline.tasks.value.length > 0 &&
     uploadApi.displayUploadTasks.value.length === 0 &&
-    uploadApi.runningRelayTasks.value.length === 0 &&
-    uploadApi.completedRelayTasks.value.length === 0;
+    uploadApi.activeRelayTasks.value.length === 0 &&
+    uploadApi.failedRelayTasks.value.length === 0;
   await uploadApi.openUploadTaskPanel(preferOffline ? "offline" : "");
-  if (preferOffline) await offline.fetchTasks(true, true);
 }
 
 function handleOfflineTasksCreated(tasks: OfflineDownloadTask[]) {
@@ -807,10 +850,11 @@ onMounted(async () => {
   window.requestAnimationFrame(() => {
     favoritesTransitionReady.value = true;
   });
-  void loadInitialTaskState();
+  void restoreTaskPanelFromRoute();
 });
 
 onUnmounted(() => {
+  stopDragUnlock();
   clearNameAlignApplyProgress();
   uploadApi.cleanupUploadTasks();
 });
@@ -842,7 +886,7 @@ onUnmounted(() => {
       添加。
     </div>
 
-    <div v-else-if="!browserBootstrapping" class="browser__frame" :class="{ 'browser__frame--grid': view === 'grid' }">
+    <div v-else-if="showBrowserFrame" class="browser__frame" :class="{ 'browser__frame--grid': view === 'grid' }">
       <div v-if="refreshing" class="browser__refresh-overlay">
         <BusySpinner variant="notch" :size="28" color="var(--brand)" />
         <span class="browser__refresh-text">正在强制刷新…</span>
@@ -857,8 +901,7 @@ onUnmounted(() => {
         :upload-task-active="uploadTaskActive"
         :upload-task-failed="uploadTaskFailed"
         :upload-task-success="uploadTaskSuccess"
-        :upload-task-title="uploadTaskTitleText"
-        :upload-task-label="uploadTaskLabelText"
+        :upload-task-label="transferTaskText"
         :favorites-open="favoritesOpen"
         :offline-download-supported="offline.capability.value?.supported"
         @refresh="store.refreshFiles"
@@ -928,7 +971,7 @@ onUnmounted(() => {
           <FileTable
             :files="files"
             :view="view"
-            :loading="loading"
+            :loading="browserFileLoading"
             :is-admin="isAdmin"
             :sort-key="sortKey"
             :sort-order="sortOrder"
@@ -945,6 +988,8 @@ onUnmounted(() => {
             :name-align-file="openNameAlign"
             :drag-active="dragMove.active"
             :active-drop-target-id="dragMove.targetId"
+            :drag-unlocked-target-id="dragMove.unlockedTargetId"
+            :drag-lock-progress="dragMove.lockProgress"
             :can-drop-on-folder="canDropOnFolder"
             @open="onOpen"
             @sort-by="sortBy"

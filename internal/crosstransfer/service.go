@@ -12,22 +12,21 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/driver"
 	"litepan/internal/file"
-	"litepan/internal/playback"
+	"litepan/internal/upload"
 )
 
 type Service struct {
-	exec  *driverexec.Executor
-	files *file.Service
-	relay *RelayManager
-	log   *slog.Logger
+	exec    *driverexec.Executor
+	files   *file.Service
+	uploads *upload.Manager
+	log     *slog.Logger
 }
 
 type Options struct {
-	Exec     *driverexec.Executor
-	Files    *file.Service
-	Playback *playback.Service
-	DataDir  string
-	Log      *slog.Logger
+	Exec    *driverexec.Executor
+	Files   *file.Service
+	Uploads *upload.Manager
+	Log     *slog.Logger
 }
 
 func New(opts Options) *Service {
@@ -35,17 +34,8 @@ func New(opts Options) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	relay := NewRelayManager(RelayOptions{
-		Exec:     opts.Exec,
-		Files:    opts.Files,
-		Playback: opts.Playback,
-		DataDir:  opts.DataDir,
-		Log:      log,
-	})
-	return &Service{exec: opts.Exec, files: opts.Files, relay: relay, log: log}
+	return &Service{exec: opts.Exec, files: opts.Files, uploads: opts.Uploads, log: log}
 }
-
-func (s *Service) Relay() *RelayManager { return s.relay }
 
 type ScanFile struct {
 	SourceFileID string `json:"source_file_id"`
@@ -816,6 +806,13 @@ func (s *Service) executeTransferFile(ctx context.Context, in executeFileInput) 
 		s.log.Warn("跨盘秒传执行前取指纹失败", "name", f.Name, "err", err)
 	}
 	if fileHash == "" {
+		if in.fallback {
+			if relayErr := s.enqueueRelayTask(ctx, in); relayErr == nil {
+				return transferItemResult(base, false, "relay", "", "")
+			} else {
+				return transferItemResult(base, false, "error", "", relayErr.Error())
+			}
+		}
 		return transferItemResult(base, false, "skip", "", "缺少指纹")
 	}
 
@@ -830,31 +827,43 @@ func (s *Service) executeTransferFile(ctx context.Context, in executeFileInput) 
 		return transferItemResult(base, true, "rapid", fileID, "")
 	}
 
-	if in.fallback && strings.TrimSpace(f.SourceFileID) != "" {
-		_, err := s.relay.CreateTask(ctx, RelayTaskInput{
-			SourceAccountID:   in.sourceAccountID,
-			SourceAccountName: in.sourceAccountName,
-			SourceDriverType:  in.sourceDriverType,
-			TargetAccountID:   in.targetAccountID,
-			TargetAccountName: in.targetAccountName,
-			TargetDriverType:  in.targetDriverType,
-			SourceFileID:      f.SourceFileID,
-			FileName:          f.Name,
-			RelPath:           f.RelPath,
-			RelDir:            f.RelDir,
-			TargetParentID:    in.targetParentID,
-			TargetDisplayPath: in.targetDisplayPath,
-			TotalBytes:        f.Size,
-			Method:            in.methodID,
-			ConflictPolicy:    in.conflict,
-		})
-		if err != nil {
+	if in.fallback {
+		if err := s.enqueueRelayTask(ctx, in); err != nil {
 			return transferItemResult(base, false, "error", "", err.Error())
 		}
 		return transferItemResult(base, false, "relay", "", "")
 	}
 
 	return transferItemResult(base, false, "rapid", "", "未命中秒传")
+}
+
+func (s *Service) enqueueRelayTask(ctx context.Context, in executeFileInput) error {
+	f := in.file
+	if s.uploads == nil {
+		return domain.Errorf(domain.CodeInternal, "上传服务未就绪")
+	}
+	if strings.TrimSpace(f.SourceFileID) == "" {
+		return domain.Errorf(domain.CodeValidation, "源文件缺少 file_id，无法执行兜底传输")
+	}
+	_, err := s.uploads.Create(ctx, upload.CreateParams{
+		AccountID:         in.targetAccountID,
+		AccountName:       in.targetAccountName,
+		DriverType:        in.targetDriverType,
+		FileName:          f.Name,
+		SourceType:        upload.SourceTypeCrossTransfer,
+		SourceAccountID:   in.sourceAccountID,
+		SourceAccountName: in.sourceAccountName,
+		SourceDriverType:  in.sourceDriverType,
+		SourceFileID:      f.SourceFileID,
+		RelPath:           f.RelPath,
+		RelDir:            f.RelDir,
+		TargetPath:        in.targetParentID,
+		TargetDisplayPath: in.targetDisplayPath,
+		TotalBytes:        f.Size,
+		ConflictPolicy:    in.conflict,
+		Phase:             upload.PhaseDownloading,
+	})
+	return err
 }
 
 func normalizeConflictPolicy(policy string) string {

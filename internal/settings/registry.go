@@ -22,6 +22,7 @@ const (
 	KeyAuthActiveRefresh           = "auth_active_refresh_enabled"
 	KeyLogLevel                    = "log_level"
 	KeyLogRetentionDays            = "log_retention_days"
+	KeyLogErrorAckAt               = "log_error_ack_at"
 	KeyEmbyEnabled                 = "emby_enabled"
 	KeyEmbyURL                     = "emby_url"
 	KeyEmbyAPIKey                  = "emby_api_key"
@@ -89,6 +90,7 @@ type Spec struct {
 	Min, Max    *int     // 仅 TypeInt
 	Options     []Option // 仅 TypeSelect
 	Sensitive   bool
+	Hidden      bool
 	// normalize 对字符串值做规范化/兜底（如 OAuth 地址校验），nil 表示不处理。
 	normalize func(string) string
 }
@@ -126,7 +128,7 @@ func defaultSpecs() []Spec {
 			Type:        TypeInt,
 			Category:    "performance",
 			Label:       "全局缓存时间",
-			Description: "目录/详情缓存的默认有效期。账号可单独覆盖；账号填 0 表示该账号禁用缓存。",
+			Description: "缓存过期时间",
 			Default:     "30",
 			Unit:        "分钟",
 			Min:         intp(0),
@@ -177,8 +179,8 @@ func defaultSpecs() []Spec {
 			Key:         KeyUploadTaskConcurrency,
 			Type:        TypeInt,
 			Category:    "performance",
-			Label:       "上传任务并发数",
-			Description: "同一时间最多进行几个上传，超出的在任务面板里排队等待；修改后立即生效。",
+			Label:       "传输任务并发数",
+			Description: "上传队列和跨盘下载队列分别最多并发几个任务；跨盘下载完成后会交棒到上传队列继续执行，超出的任务会在面板里排队等待；修改后立即生效。",
 			Default:     "3",
 			Unit:        "个",
 			Min:         intp(1),
@@ -266,6 +268,12 @@ func defaultSpecs() []Spec {
 			Unit:        "天",
 			Min:         intp(1),
 			Max:         intp(365),
+		},
+		{
+			Key:     KeyLogErrorAckAt,
+			Type:    TypeString,
+			Default: "",
+			Hidden:  true,
 		},
 		{
 			Key:         KeyEmbyEnabled,

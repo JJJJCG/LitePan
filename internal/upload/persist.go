@@ -58,7 +58,7 @@ func (m *Manager) restoreTasks() {
 			st.SpeedBytesPerSecond = 0
 			changed = true
 		}
-		if uploadNeedsLocalFile(st.Status) {
+		if uploadNeedsLocalFile(st) {
 			if st.localPath == "" {
 				st.Status = StatusFailed
 				st.Message = "上传失败"
@@ -94,13 +94,21 @@ func (m *Manager) restoreTasks() {
 	}
 }
 
-func uploadNeedsLocalFile(status string) bool {
-	switch status {
-	case StatusPending, StatusRunning, StatusPaused, StatusFailed, StatusCanceled:
-		return true
-	default:
+func uploadNeedsLocalFile(st *taskState) bool {
+	if st == nil {
 		return false
 	}
+	switch st.Status {
+	case StatusSuccess, StatusSkipped:
+		return false
+	}
+	if st.SourceType != SourceTypeCrossTransfer {
+		return true
+	}
+	if st.Phase == PhaseUploading {
+		return true
+	}
+	return len(st.resumeData) > 0 || st.UploadedBytes > 0
 }
 
 func recordFromState(st *taskState) *domain.UploadTaskRecord {
@@ -123,10 +131,19 @@ func recordFromState(st *taskState) *domain.UploadTaskRecord {
 		AccountName:         st.AccountName,
 		DriverType:          st.DriverType,
 		FileName:            st.FileName,
+		SourceType:          st.SourceType,
+		SourceAccountID:     st.SourceAccountID,
+		SourceAccountName:   st.SourceAccountName,
+		SourceDriverType:    st.SourceDriverType,
+		SourceFileID:        st.SourceFileID,
+		RelPath:             st.RelPath,
+		RelDir:              st.RelDir,
 		TargetPath:          st.TargetPath,
 		TargetDisplayPath:   st.TargetDisplayPath,
 		Status:              st.Status,
+		Phase:               st.Phase,
 		Progress:            st.Progress,
+		DownloadedBytes:     st.DownloadedBytes,
 		UploadedBytes:       st.UploadedBytes,
 		SpeedBytesPerSecond: st.SpeedBytesPerSecond,
 		TotalBytes:          st.TotalBytes,
@@ -151,10 +168,19 @@ func stateFromRecord(row *domain.UploadTaskRecord) *taskState {
 			AccountName:         row.AccountName,
 			DriverType:          row.DriverType,
 			FileName:            row.FileName,
+			SourceType:          row.SourceType,
+			SourceAccountID:     row.SourceAccountID,
+			SourceAccountName:   row.SourceAccountName,
+			SourceDriverType:    row.SourceDriverType,
+			SourceFileID:        row.SourceFileID,
+			RelPath:             row.RelPath,
+			RelDir:              row.RelDir,
 			TargetPath:          row.TargetPath,
 			TargetDisplayPath:   row.TargetDisplayPath,
 			Status:              row.Status,
+			Phase:               row.Phase,
 			Progress:            row.Progress,
+			DownloadedBytes:     row.DownloadedBytes,
 			UploadedBytes:       row.UploadedBytes,
 			SpeedBytesPerSecond: row.SpeedBytesPerSecond,
 			TotalBytes:          row.TotalBytes,
@@ -181,6 +207,16 @@ func stateFromRecord(row *domain.UploadTaskRecord) *taskState {
 	}
 	if st.conflictPolicy == "" {
 		st.conflictPolicy = "overwrite"
+	}
+	if st.SourceType == "" {
+		st.SourceType = SourceTypeManual
+	}
+	if st.Phase == "" {
+		if st.SourceType == SourceTypeCrossTransfer {
+			st.Phase = PhaseDownloading
+		} else {
+			st.Phase = PhaseUploading
+		}
 	}
 	return st
 }

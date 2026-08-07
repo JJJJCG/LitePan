@@ -10,10 +10,19 @@ type UploadTaskRecord struct {
 	AccountName         string
 	DriverType          string
 	FileName            string
+	SourceType          string
+	SourceAccountID     int64
+	SourceAccountName   string
+	SourceDriverType    string
+	SourceFileID        string
+	RelPath             string
+	RelDir              string
 	TargetPath          string
 	TargetDisplayPath   string
 	Status              string
+	Phase               string
 	Progress            int
+	DownloadedBytes     int64
 	UploadedBytes       int64
 	SpeedBytesPerSecond float64
 	TotalBytes          int64
